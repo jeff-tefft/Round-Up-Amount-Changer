@@ -1,0 +1,196 @@
+<script>
+(function(win) {
+    'use strict';
+    
+    var listeners = [], 
+    doc = win.document, 
+    MutationObserver = win.MutationObserver || win.WebKitMutationObserver,
+    observer;
+    
+    function ready(selector, fn) {
+        // Store the selector and callback to be monitored
+        listeners.push({
+            selector: selector,
+            fn: fn
+        });
+        if (!observer) {
+            // Watch for changes in the document
+            observer = new MutationObserver(check);
+            observer.observe(doc.documentElement, {
+                childList: true,
+                subtree: true
+            });
+        }
+        // Check if the element is currently in the DOM
+        check();
+    }
+        
+    function check() {
+        // Check the DOM for elements matching a stored selector
+        for (var i = 0, len = listeners.length, listener, elements; i < len; i++) {
+            listener = listeners[i];
+            // Query for elements matching the specified selector
+            elements = doc.querySelectorAll(listener.selector);
+            for (var j = 0, jLen = elements.length, element; j < jLen; j++) {
+                element = elements[j];
+                // Make sure the callback isn't invoked with the 
+                // same element more than once
+                if (!element.ready) {
+                    element.ready = true;
+                    // Invoke the callback with the element
+                    listener.fn.call(element, element);
+                }
+            }
+        }
+    }
+
+    // Expose `ready`
+    win.ready = ready;
+            
+})(this);
+
+function getCart(url) {
+  return fetch(url, {
+    method: "GET",
+    credentials: "same-origin"
+  })
+  .then(response => response.json())
+  .catch(error => alert(error + ' - getCart'));
+};
+    
+
+function getCheckout(cart_url, cart_id){
+    cart_url += cart_id;
+    return fetch(cart_url, {
+    method: "GET",
+    credentials: "same-origin",
+    "headers": {
+        "Content-Type": "application/json"
+      }
+  })
+  .then(response => response.json())//debug-- not returning cart object .then(response => response.json())
+  .catch(error => alert(error + '- getCheckout'));
+};
+
+function editPrice(url, cartId, cartItems) {
+  return fetch(url + cartId + '/items', {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(cartItems),
+  })
+  .then(response => response.json())
+  .catch(error => console.error(error));
+};
+
+
+function deleteCartItem(url, cartId, itemId) {
+  return fetch(url + cartId + '/items/' + itemId, {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+    }
+  })
+  .then(response => response.json())
+  .catch(error => alert(error));
+};
+
+ready('#radio-nmi', function(element) {
+    // get cart
+     getCart('/api/storefront/carts?include=lineItems.digitalItems.options,lineItems.physicalItems.options')
+        .then(function(data) {
+         	//special check for an item with a no-longer manufactured necessary accessory
+         	var physical_items = data[0]['lineItems']['physicalItems'];
+         	 for (var j = 0; j < physical_items.length; j++) {
+                if (physical_items[j]['sku'] == '19559') {
+                    alert("Please note that item 19559 is a Float 1.0 airbag and WILL NOT WORK with a 2.0 cylinder. Float 1.0 cylinders are no longer being made. DO NOT PURCHASE if you do not already have a 1.0 cylinder."); 
+                }
+             }
+         
+            var digital_items = data[0]['lineItems']['digitalItems'];
+            
+            // check cart for round-up item
+            // set roundup amount - highest roundup encountered
+            var round_up_item;
+            var round_amount = 0;
+            for (var i = 0; i < digital_items.length; i++) {
+                if (digital_items[i]['sku'] == 'ROUND-1') {
+                    if (round_amount < 1) {
+                        round_amount = 1;
+                        round_up_item = digital_items[i];
+                    }
+                } else if (digital_items[i]['sku'] == 'ROUND-5') {
+                    if (round_amount < 5) {
+                        round_amount = 5;
+                        round_up_item = digital_items[i];
+                    }
+                }
+                
+            }
+            //working here
+            if (round_amount > 0) {
+
+                // check checkout total for current total
+                getCheckout("api/storefront/checkouts/", data[0]['id'] )
+                    .then(function(checkout) {
+                        var grandtotal = checkout['grandTotal'];
+
+                        // $0 if perfect round
+                    	var initial_amount_in_cart = round_up_item['quantity']
+                        grandtotal -= (0.01 * initial_amount_in_cart); //because item adds $0.01 per
+                        var rounded_total = grandtotal / round_amount;
+                        rounded_total = Math.ceil(rounded_total);
+                        rounded_total *= round_amount;
+                        var rounded_price = rounded_total - grandtotal;
+
+                        // store change as integer because set as quantity change to $0.01 item
+                        rounded_price = rounded_price.toFixed(2);
+                        rounded_price *= 100;
+
+                        //catches already done and manually assigned amounts
+                        if (checkout['grandTotal'].toFixed(2) == rounded_total.toFixed(2)) {
+                            return;
+                        }
+
+                        //delete old item because below quantity adjustment only adds, not replaces
+                        deleteCartItem("/api/storefront/carts/", data[0]['id'], round_up_item['id'])
+                            .then(function(deletion) {
+                            	//catches the case when the item couldn't be deleted for some reason
+                            	if (typeof deletion == "undefined") {rounded_price -= initial_amount_in_cart;}
+                            
+                                // put change in total into roundup item quantity in cart
+                                round_up_item['quantity'] = rounded_price;
+                            
+                            	//reverts from the case when the item couldn't be deleted for some reason
+                            	if (typeof deletion == "undefined") {rounded_price += initial_amount_in_cart;}
+                            
+                                editPrice("/api/storefront/carts/", data[0]['id'] , {
+                                    "lineItems": [
+                                        round_up_item , 
+                                    ]})
+                                    .then(function(response) {
+                                        // create alert message and send alert to user
+                                        var roundup_message = 'Your cart has been rounded up to the nearest $';
+                                        roundup_message += round_amount;
+                                        roundup_message += ' by adding a total donation of $';
+                                        roundup_message += (rounded_price / 100).toFixed(2);
+                                        roundup_message += '.\nThe page will now refresh to update the checkout.';
+                                        alert(roundup_message);
+                                        window.location.assign(window.location);
+                                    })
+                                    .catch(error => alert(error + " - final step"));
+                            })
+                            .catch(error => alert(error));
+
+                    })
+                    .catch(error => alert(error + " - middle part"));
+            }
+     })
+        .catch(error => alert(error + "first part"));
+
+    //alert('you are on the payment step!');
+});   
+</script>
